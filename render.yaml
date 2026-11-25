@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: movie-recs-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: >-
+      python -c "import os, pathlib; sha=os.getenv('RENDER_GIT_COMMIT') or os.getenv('SOURCE_VERSION') or ''; pathlib.Path('REVISION').write_text(sha, encoding='utf-8') if sha else None"
+      && pip install --upgrade pip
+      && pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: false
+    buildFilter:
+      paths:
+        - backend/**
+        - requirements.txt
+        - render.yaml
+      ignoredPaths:
+        - streamlit_app.py
+        - docs/**
+        - legacy/**
+        - .github/**
+        - README.md
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: NOVA_SERVING_PROFILE
+        value: lite
+      - key: NOVA_SERVING_TIER
+        value: tier3
+      - key: NOVA_HEALTH_LOAD_RECOMMENDER
+        value: "true"
+      - key: NOVA_BACKGROUND_RECOMMENDER_WARMUP
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      # JWT_SECRET_KEY must be set in the Render dashboard — never committed
+      - key: JWT_SECRET_KEY
+        sync: false
+      # NOVA_ADMIN_TOKEN must be set in the Render dashboard — never committed
+      - key: NOVA_ADMIN_TOKEN
+        sync: false
+      # Optional: Stripe keys for billing (set in Render dashboard)
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      # Optional: Sentry for error monitoring (set in Render dashboard)
+      - key: SENTRY_DSN
+        sync: false

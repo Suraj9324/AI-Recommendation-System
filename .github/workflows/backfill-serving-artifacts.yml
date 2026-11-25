@@ -1,0 +1,52 @@
+name: Backfill Serving Artifacts
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/backfill-serving-artifacts.yml'
+      - 'scripts/backfill_serving_metadata_artifacts.py'
+      - 'scripts/validate_serving_artifacts.py'
+      - 'etl/semantic_artifacts.py'
+      - 'backend/semantic_twin.py'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.12'
+  HF_REPO: pavanbadempet/movie-recs-models
+
+jobs:
+  backfill-serving-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Backfill missing serving metadata artifacts
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/backfill_serving_metadata_artifacts.py \
+            --repo "$HF_REPO" \
+            --token "$HF_TOKEN" \
+            --upload-to-hf
+
+      - name: Validate Hugging Face serving artifact contract
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/validate_serving_artifacts.py --repo "$HF_REPO" --token "$HF_TOKEN" --allow-metadata-only-vectors

@@ -1,0 +1,55 @@
+# Keep-alive workflow to prevent Render and Streamlit free tier cold starts
+# Pings the services every 14 minutes to keep them warm
+
+name: Keep Services Alive
+
+# Pings all hosted services to prevent free-tier cold starts.
+# Playwright is NOT installed here — curl is sufficient for health checks and
+# avoids the 60–90 second Playwright install cost on every 5-minute run.
+# The Streamlit wake-up button click is handled by synthetic-monitoring.yml
+# which runs on a longer schedule with full browser tooling.
+
+on:
+  # Automated cron disabled to comply with runner acceptable-use policies
+  # schedule:
+  #   - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-services:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping Hugging Face Space
+        run: |
+          echo "Pinging Hugging Face Space..."
+          if curl -sf --max-time 30 "https://pavanbadempet-movie-rec-api.hf.space/"; then
+            echo "HF Space is alive."
+          else
+            echo "HF Space ping failed (may be cold-starting)."
+          fi
+
+      - name: Ping Render backend
+        run: |
+          echo "Pinging Render backend..."
+          # Render free tier can take up to 2 minutes to spin up — retry with backoff.
+          for i in $(seq 1 15); do
+            if curl -sf --max-time 30 "https://movie-recs-api-5qvy.onrender.com/health"; then
+              echo "Render backend is alive."
+              exit 0
+            fi
+            echo "Attempt $i/15 failed — waiting 10 s..."
+            sleep 10
+          done
+          echo "Render backend did not respond after 15 attempts (may be suspended)."
+          exit 0
+
+      - name: Ping Streamlit app
+        run: |
+          echo "Pinging Streamlit app..."
+          # Simple HTTP probe — full wake-up click is handled by synthetic-monitoring.yml
+          if curl -sf --max-time 30 "https://a-movie-recommendation-system.streamlit.app/"; then
+            echo "Streamlit app is alive."
+          else
+            echo "Streamlit ping failed (may be sleeping — synthetic-monitoring will wake it)."
+          fi

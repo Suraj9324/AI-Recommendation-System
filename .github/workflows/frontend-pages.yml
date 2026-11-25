@@ -1,0 +1,49 @@
+name: Frontend GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "book/**"
+      - "README_DATA_ENGINEERING.md"
+      - ".github/workflows/frontend-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frontend-pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: bun install
+
+      - name: Build React 19 Frontend
+        working-directory: frontend
+        env:
+          VITE_BASE_PATH: /AI-Recommendation-System/
+          VITE_API_URL: https://pavanbadempet-movie-rec-api.hf.space
+        run: bun run build
+
+      - name: Prepare GitHub Pages Distribution
+        run: |
+          cp -r book frontend/dist/book
+          touch frontend/dist/.nojekyll
+          cp frontend/dist/index.html frontend/dist/404.html
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./frontend/dist

@@ -1,0 +1,122 @@
+name: Sync to Hugging Face Hub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install huggingface_hub
+
+      - name: Validate Python syntax before Space sync
+        run: python -m compileall backend etl airflow scripts frontend/streamlit_app.py manage.py tests
+
+      - name: Stamp app revision
+        run: |
+          echo "${GITHUB_SHA}" > REVISION
+          git add -f REVISION
+          echo "ENV NOVA_APP_COMMIT=${GITHUB_SHA}" >> Dockerfile
+
+      - name: Inject Hugging Face Space metadata into README.md
+        run: |
+          python -c "
+          with open('README.md', 'r', encoding='utf-8') as f:
+              content = f.read()
+          if not content.startswith('---'):
+              frontmatter = '---\ntitle: Movie Rec Api\nemoji: 🎬\ncolorFrom: indigo\ncolorTo: purple\nsdk: docker\napp_port: 7860\npinned: false\n---\n\n'
+              with open('README.md', 'w', encoding='utf-8') as f:
+                  f.write(frontmatter + content)
+              print('Injected HF frontmatter into README.md for Space deployment')
+          else:
+              print('README.md already contains HF frontmatter, skipping injection')
+          "
+
+      - name: Ensure Movie Catalog exists on Hugging Face Model Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          pip install pyarrow huggingface_hub
+          python scripts/ensure_model_hub_catalog.py
+
+      - name: Deploy to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c "
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          print('Uploading repository to Hugging Face Spaces...')
+          api.upload_folder(
+              folder_path='.',
+              repo_id='pavanbadempet/movie-rec-api',
+              repo_type='space',
+              ignore_patterns=[
+                  '.git/*',
+                  '.github/*',
+                  '.hypothesis/*',
+                  '.mypy_cache/*',
+                  '.pytest_cache/*',
+                  '.ruff_cache/*',
+                  '.wrangler/*',
+                  '.agents/*',
+                  '.kiro/*',
+                  'node_modules/*',
+                  'frontend/node_modules/*',
+                  'frontend/coverage/*',
+                  'tests/*',
+                  'tests/**/*',
+                  '**/*.pyc',
+                  '**/__pycache__/*',
+                  # Binary model files (HF requires Xet storage for binaries)
+                  '*.onnx',
+                  '*.onnx.data',
+                  '*.tq',
+                  'models/*',
+                  'models/**/*',
+                  'backend/models/*.index',
+                  'backend/models/*.npy',
+                  'backend/models/*.joblib',
+                  'backend/models/*.joblib.metadata.json',
+                  'backend/models/pipeline_manifest.json',
+                  'backend/models/onnx/*',
+                  # Large data directories
+                  'data/processed/*.parquet',
+                  'data/bronze/*',
+                  'data/silver/*',
+                  'data/gold/*',
+                  'data/manifests/*',
+                  'data/quality/*',
+                  # System binaries
+                  '.hadoop/*',
+                  # Database and logs
+                  '*.sqlite3',
+                  '*.log',
+                  '*.err',
+              ]
+          )
+          print('Uploading REVISION file explicitly...')
+          api.upload_file(
+              path_or_fileobj='REVISION',
+              path_in_repo='REVISION',
+              repo_id='pavanbadempet/movie-rec-api',
+              repo_type='space'
+          )
+          print('Upload complete!')
+          "

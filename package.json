@@ -1,0 +1,14 @@
+{
+  "name": "movie-recommendation-system",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "bun@1.2.0",
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "dev:frontend": "bun --cwd frontend dev",
+    "dev:backend": "cargo run --manifest-path backend/rust_core/Cargo.toml --bin apex_server",
+    "build": "bun run --cwd frontend build",
+    "test": "bun run --cwd frontend test",
+    "start": "bun frontend/server.ts"
+  }
+}

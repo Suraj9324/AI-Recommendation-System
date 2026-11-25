@@ -1,0 +1,424 @@
+name: APEX Universal Recommendation Engine CI/CD
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "24"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 0. Pre-commit hooks (fastest gate — catches formatting/secret issues first)
+  # ---------------------------------------------------------------------------
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # full history for gitleaks
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Run pre-commit
+      uses: pre-commit/action@v3.0.1
+      env:
+        SKIP: no-commit-to-branch,hadolint
+
+  # ---------------------------------------------------------------------------
+  # 0.1 Lint & format gate (fast — runs before any tests)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Ruff Lint & Format Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dev tooling
+      run: pip install -r requirements-dev.txt
+
+    - name: Lint (ruff check)
+      run: python -m ruff check backend/ tests/ scripts/ etl/
+
+    - name: Format check (ruff format --check)
+      run: python -m ruff format --check backend/ tests/ scripts/ etl/
+
+  # ---------------------------------------------------------------------------
+  # 0.5 Static type checking (mypy)
+  # ---------------------------------------------------------------------------
+  type-check:
+    name: Mypy Static Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install mypy and type stubs
+      run: |
+        pip install -r requirements-dev.txt
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+
+    - name: Run mypy on backend
+      # Use --ignore-missing-imports for third-party libs without stubs
+      # (already declared in pyproject.toml [[tool.mypy.overrides]]).
+      # --no-error-summary keeps output concise in CI logs.
+      run: |
+        python -m mypy backend/ \
+          --config-file pyproject.toml \
+          --no-error-summary \
+          --pretty
+
+  # ---------------------------------------------------------------------------
+  # Helm chart lint
+  # ---------------------------------------------------------------------------
+  helm-lint:
+    name: Helm Chart Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.16.0
+
+    - name: Lint Helm chart
+      run: helm lint k8s/helm/apex/
+
+  # ---------------------------------------------------------------------------
+  # 1. Core unit + property-based tests (fast, no heavy ML deps)
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit & Property-Based Tests
+    runs-on: ubuntu-latest
+    needs: [lint, type-check, pre-commit]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+
+    - name: Run unit & property-based tests
+      env:
+        JWT_SECRET_KEY: test-jwt-secret-key-for-ci-only
+        NOVA_DISABLE_MODEL_DOWNLOADS: "1"
+      run: |
+        python -m pytest \
+          tests/test_session_sequence.py \
+          tests/test_ensemble_weights.py \
+          tests/test_online_learner.py \
+          tests/test_rl_wiring.py \
+          tests/test_finetune_two_tower.py \
+          tests/test_events.py \
+          tests/test_experiments.py \
+          tests/test_slo.py \
+          tests/test_frontend_failover.py \
+          tests/test_remote_recommender.py \
+          tests/test_ranker.py \
+          tests/test_model_loader.py \
+          tests/test_semantic_twin.py \
+          tests/test_query_understanding.py \
+          tests/test_serving_tier_properties.py \
+          tests/test_onnx_thread_count.py \
+          tests/test_orjson_roundtrip.py \
+          tests/test_retrieval_pipeline_properties.py \
+          tests/test_ranking_pipeline_properties.py \
+          tests/test_reranking_pipeline_properties.py \
+          tests/test_ablation_serialization_property.py \
+          tests/test_online_learning_coordinator.py \
+          tests/test_dp_thread_safety.py \
+          tests/test_serving_tier_vram.py \
+          tests/test_cold_start_properties.py \
+          tests/test_fast_cache.py \
+          tests/test_mlops_engine.py \
+          tests/test_model_health_monitor.py \
+          backend/tests/test_neural_weight_optimizer.py \
+          backend/tests/test_replay.py \
+          backend/tests/test_ensemble_math.py \
+          backend/tests/test_multimodal.py \
+          backend/tests/test_rl_policy.py \
+          backend/tests/test_two_tower.py \
+          backend/tests/test_fairness.py \
+          backend/tests/test_content_understanding.py \
+          backend/tests/test_explanations.py \
+          backend/tests/test_cache.py \
+          -v --tb=short -q \
+          --cov=backend --cov-report=term-missing --cov-report=xml \
+          --cov-fail-under=38 \
+          -x
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: coverage-report
+        path: coverage.xml
+
+  # ---------------------------------------------------------------------------
+  # 2. API integration tests
+  # ---------------------------------------------------------------------------
+  api-tests:
+    name: API Integration Tests
+    runs-on: ubuntu-latest
+    needs: [lint, type-check, pre-commit]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+
+    - name: Run API integration tests
+      env:
+        JWT_SECRET_KEY: test-jwt-secret-key-for-ci-only
+        NOVA_DISABLE_MODEL_DOWNLOADS: "1"
+      run: |
+        python -m pytest \
+          tests/test_api.py \
+          backend/tests/test_api_endpoints.py \
+          backend/tests/test_security_api.py \
+          tests/test_artifact_health.py \
+          tests/test_catalogs.py \
+          tests/test_database.py \
+          -v --tb=short -q -x -n 0
+
+  # ---------------------------------------------------------------------------
+  # 3. PySpark & data pipeline tests
+  # ---------------------------------------------------------------------------
+  data-pipeline-tests:
+    name: Data Pipeline & PySpark Tests
+    runs-on: ubuntu-latest
+    needs: [lint, type-check, pre-commit]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install Java (required for PySpark)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends default-jre
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        pip install -r requirements.txt
+        pip install -r requirements-etl.txt
+
+    - name: Run data pipeline tests
+      env:
+        JWT_SECRET_KEY: test-jwt-secret-key-for-ci-only
+        NOVA_DISABLE_MODEL_DOWNLOADS: "1"
+      run: |
+        python -m pytest \
+          tests/test_pyspark_scd.py \
+          tests/test_scd.py \
+          tests/test_etl.py \
+          tests/test_delta_lakehouse.py \
+          tests/test_lakehouse.py \
+          tests/test_semantic_artifacts.py \
+          -v --tb=short -q -x
+
+  # ---------------------------------------------------------------------------
+  # 4. ML model & benchmark tests
+  # ---------------------------------------------------------------------------
+  ml-tests:
+    name: ML Model & Benchmark Tests
+    runs-on: ubuntu-latest
+    needs: [lint, type-check, pre-commit]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+
+    - name: Run ML model tests
+      env:
+        JWT_SECRET_KEY: test-jwt-secret-key-for-ci-only
+        NOVA_DISABLE_MODEL_DOWNLOADS: "1"
+      run: |
+        python -m pytest \
+          tests/test_semantic_benchmark.py \
+          tests/test_recommendation_benchmark.py \
+          tests/test_search_benchmark.py \
+          backend/tests/test_models_fuzzing.py \
+          backend/tests/test_replay.py \
+          backend/tests/test_integration_pipeline.py \
+          -v --tb=short -q -x
+
+  # ---------------------------------------------------------------------------
+  # 5. Frontend build & lint
+  # ---------------------------------------------------------------------------
+  frontend-tests:
+    name: Frontend React Build & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Use Node.js 24
+      uses: actions/setup-node@v4
+      with:
+        node-version: "24"
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+
+    - name: Install dependencies (bun)
+      working-directory: ./frontend
+      run: bun install
+
+    - name: Run linter
+      working-directory: ./frontend
+      run: bun run lint
+
+    - name: Run type check
+      working-directory: ./frontend
+      run: bun run type-check
+
+    - name: Run Vitest unit tests
+      working-directory: ./frontend
+      run: bun run test -- --coverage --reporter=verbose
+
+    - name: Build React application
+      working-directory: ./frontend
+      run: bun run build
+
+  # ---------------------------------------------------------------------------
+  # 5.5 OpenAPI spec export (validates spec can be generated; uploads artifact)
+  # ---------------------------------------------------------------------------
+  openapi-export:
+    name: Export OpenAPI Spec
+    runs-on: ubuntu-latest
+    needs: [lint, type-check, pre-commit]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install pyyaml
+
+    - name: Export OpenAPI spec
+      env:
+        JWT_SECRET_KEY: openapi-export-ci-placeholder
+        NOVA_DISABLE_MODEL_DOWNLOADS: "1"
+        NOVA_HEALTH_LOAD_RECOMMENDER: "false"
+        NOVA_BACKGROUND_RECOMMENDER_WARMUP: "false"
+      run: python scripts/export_openapi_spec.py
+
+    - name: Verify spec files exist
+      run: |
+        test -f docs/openapi.json && echo "openapi.json OK"
+        test -f docs/openapi.yaml && echo "openapi.yaml OK"
+        python -c "import json; s=json.load(open('docs/openapi.json')); print(f'Endpoints: {sum(len(v) for v in s[\"paths\"].values())} | Schemas: {len(s.get(\"components\",{}).get(\"schemas\",{}))}')"
+
+    - name: Upload OpenAPI spec artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: openapi-spec
+        path: |
+          docs/openapi.json
+          docs/openapi.yaml
+          docs/swagger-ui.html
+
+  # ---------------------------------------------------------------------------
+  # 6. Docker Compose validation
+  # ---------------------------------------------------------------------------
+  docker-integration:
+    name: Docker Compose Integration Build
+    needs: [lint, type-check, unit-tests, api-tests, frontend-tests]
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Validate Docker Compose configuration
+      run: |
+        touch .env
+        docker compose config
+        echo "Docker orchestration validated."
+
+    - name: Verify Dockerfile syntax (hadolint)
+      uses: hadolint/hadolint-action@v3.4.0
+      with:
+        dockerfile: Dockerfile
+        failure-threshold: warning
+
+    - name: Verify backend/Dockerfile syntax (hadolint)
+      uses: hadolint/hadolint-action@v3.4.0
+      with:
+        dockerfile: backend/Dockerfile
+        failure-threshold: warning

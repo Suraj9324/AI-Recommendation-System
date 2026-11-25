@@ -1,0 +1,106 @@
+"""Catalog browse and semantic twin API routes."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from starlette.concurrency import run_in_threadpool
+
+from backend.api.fast_cache import cached_endpoint
+from backend.data.auth import TenantContext
+from backend.router_deps import RouterDeps
+
+# Pre-cached binary buffer for zero-copy vector serving
+_CACHED_VECTORS_BYTES: bytes | None = None
+
+
+def clear_vectors_cache():
+    global _CACHED_VECTORS_BYTES
+    _CACHED_VECTORS_BYTES = None
+
+
+def create_browse_router(deps: RouterDeps) -> APIRouter:
+    """Build browse routes with injected runtime dependencies."""
+    resolve_tenant_context = deps.resolve_tenant_context
+    remote_payload_or_raise = deps.remote_payload_or_raise
+    get_rec = deps.get_rec
+    record_usage = deps.record_usage
+    router = APIRouter(tags=["Browse"])
+
+    @router.get("/movies")
+    async def list_movies(
+        limit: int = Query(default=100, ge=1, le=1000, description="Maximum movies to return"),
+        offset: int = Query(default=0, ge=0, description="Offset for pagination"),
+    ):
+        remote_payload = await remote_payload_or_raise(
+            "/movies",
+            params={"limit": limit, "offset": offset},
+        )
+        if remote_payload is not None:
+            return remote_payload
+
+        rec = await run_in_threadpool(get_rec)
+        movies = rec.movies.iloc[offset : offset + limit]
+        return movies.to_dict(orient="records")
+
+    @router.get("/movies/titles")
+    @cached_endpoint(ttl=300.0)
+    async def get_all_titles(
+        limit: int = Query(default=100000, ge=1, le=100000, description="Maximum number of titles to return"),
+    ):
+        remote_payload = await remote_payload_or_raise("/movies/titles", params={"limit": limit})
+        if remote_payload is not None:
+            return remote_payload
+
+        rec = await run_in_threadpool(get_rec)
+        return rec.get_all_titles(limit=limit)
+
+    @router.get("/movies/vectors")
+    async def get_all_vectors():
+        from fastapi.responses import Response
+        import numpy as np
+
+        global _CACHED_VECTORS_BYTES
+
+        rec = await run_in_threadpool(get_rec)
+        if rec._vectors is None:
+            raise HTTPException(status_code=404, detail="Vectors not loaded")
+
+        if _CACHED_VECTORS_BYTES is None:
+            vecs = np.ascontiguousarray(rec._vectors, dtype=np.float32)
+            _CACHED_VECTORS_BYTES = vecs.tobytes()
+
+        return Response(content=_CACHED_VECTORS_BYTES, media_type="application/octet-stream")
+
+    @router.get("/v1/semantic-twins/id/{movie_id}")
+    async def semantic_twin_by_id(
+        movie_id: int = Path(..., ge=0),
+        context: TenantContext = Depends(resolve_tenant_context),
+    ):
+        remote_payload = await remote_payload_or_raise(
+            f"/v1/semantic-twins/id/{movie_id}",
+            context=context,
+        )
+        if remote_payload is not None:
+            record_usage(
+                "semantic_twins.id.remote",
+                context.tenant_id,
+                context.catalog_id,
+                plan=context.plan,
+                authenticated=context.authenticated,
+            )
+            return remote_payload
+
+        rec = await run_in_threadpool(get_rec)
+        twin = rec.get_semantic_twin_by_id(movie_id)
+        if twin is None:
+            raise HTTPException(status_code=404, detail=f"Movie with ID {movie_id} not found")
+        record_usage(
+            "semantic_twins.id",
+            context.tenant_id,
+            context.catalog_id,
+            plan=context.plan,
+            authenticated=context.authenticated,
+        )
+        return twin
+
+    return router
